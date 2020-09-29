@@ -1,56 +1,87 @@
-import * as _ from "underscore";
-import { db, Widget, DataLinkKey } from "./db";
-const arrify = require('arrify');
+import * as _ from 'underscore';
+import { db, Widget, DataLinkKey } from './db';
 
-export function getWidget(tenantId: string, cardUuid: string, uuid: string): Promise<Widget | undefined> {
-    return Promise.resolve(
-        db.find(x => x.tenantId === tenantId && x.cardUuid === cardUuid && x.uuid === uuid)
+const arrify = require('arrify');
+const maxDepth = 58;
+
+export function getWidget(
+  tenantId: string,
+  cardUuid: string,
+  uuid: string
+): Promise<Widget | undefined> {
+  return Promise.resolve(
+    db.find(
+      (x) =>
+        x.tenantId === tenantId && x.cardUuid === cardUuid && x.uuid === uuid
     )
+  );
 }
 
-//FIXME: In the future there might be passed another traversal algorithm
-export async function getDataLinkWidgetsChain(widgetOrWidgets: Widget | Widget[]): Promise<Widget[]> {
-    const widgets = arrify(widgetOrWidgets);
-    let loaded: Widget[] = [...widgets];
-
-    const getDataLinkKeysToLoad = (chunk: Widget[]): DataLinkKey[] => _.flatten(
-        chunk.map(
-            w => _.values(
-                _.mapObject(w.dataLink || {}, val => val.widgetKey)
-            )
-        )
+const getDataLinkKeysToLoad = (widgets: Widget[]): any => {
+  const [widgetsToLoad] = widgets.map((widget) => {
+    const dataLinkObject = widget.dataLink || {};
+    const linkedObjectWithId = _.mapObject(
+      dataLinkObject,
+      (value) => value.widgetKey
     );
+    const linkedObject = _.values(linkedObjectWithId);
+    return linkedObject;
+  });
+  return widgetsToLoad;
+};
 
-    let toLoad: DataLinkKey[] = getDataLinkKeysToLoad(widgets);
+const checkLoad = (widget: DataLinkKey, loadedWidgets: Widget[]) => {
+  const isNeedToLoad = !loadedWidgets.find(
+    (loadedWidget) =>
+      widget.cardUuid === loadedWidget.cardUuid &&
+      widget.widgetUuid === loadedWidget.uuid
+  );
+  return isNeedToLoad;
+};
 
-    //limit maximum resolution depth
-    for (let depth = 0; depth < 58 && toLoad.length; depth++) {
-        //filter out widgets that has been already loaded
-        toLoad = _.uniq(
-            toLoad.filter(
-                k => !loaded.find(w => k.cardUuid === w.cardUuid && w.uuid === k.widgetUuid)
-            ),
-            false,
-            x => `${x.tenantId}${x.cardUuid}${x.widgetUuid}`
-        );
+const filterWidgetsToLoad = (
+  widgetsToLoad: DataLinkKey[],
+  loadedWidgets: Widget[]
+) => {
+  return _.uniq(
+    widgetsToLoad.filter((widget) => checkLoad(widget, loadedWidgets)),
+    false,
+    (x) => `${x.tenantId}${x.cardUuid}${x.widgetUuid}`
+  );
+};
 
-        //if nothing to resolve, that means that everything has been resolved
-        if (!toLoad.length) {
-            break;
-        }
+const getNewLoadedWidgets = async (widgetsToLoadFiltered: DataLinkKey[]) => {
+  const loadedChunk = await Promise.all(
+    widgetsToLoadFiltered.map((k) =>
+      getWidget(k.tenantId, k.cardUuid, k.widgetUuid)
+    )
+  );
+  const filteredChunk = loadedChunk.filter((x) => x) as Widget[];
+  return filteredChunk;
+};
 
-        let loadedChunk = await Promise.all(
-            toLoad.map(k => getWidget(k.tenantId, k.cardUuid, k.widgetUuid))
-        );
+//FIXME: In the future there might be passed another traversal algorithm
+export async function getDataLinkWidgetsChain(
+  widgetOrWidgets: Widget | Widget[]
+): Promise<Widget[]> {
+  const widgets = arrify(widgetOrWidgets);
 
-        //filter out not found widgets
-        const filteredChunk = loadedChunk.filter(x => x) as Widget[];
+  let loadedWidgets: Widget[] = [...widgets];
+  let widgetsToLoad: DataLinkKey[] = getDataLinkKeysToLoad(widgets);
 
-        //add to loaded array
-        loaded = [...loaded, ...filteredChunk];
+  //limit maximum resolution depth
+  for (let depth = 0; depth < maxDepth; depth++) {
+    if (!widgetsToLoad.length) break;
 
-        toLoad = getDataLinkKeysToLoad(filteredChunk);
-    }
+    const widgetsToLoadFiltered = filterWidgetsToLoad(widgetsToLoad, loadedWidgets);
 
-    return loaded;
+    if (!widgetsToLoadFiltered.length) break;
+
+    const newLoadedWidgets = await getNewLoadedWidgets(widgetsToLoadFiltered);
+
+    loadedWidgets = [...loadedWidgets, ...newLoadedWidgets];
+    widgetsToLoad = getDataLinkKeysToLoad(newLoadedWidgets);
+  }
+
+  return loadedWidgets;
 }
